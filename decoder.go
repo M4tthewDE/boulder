@@ -1,9 +1,8 @@
 package boulder
 
 import (
-	"bufio"
-	"io"
 	"log"
+	"math"
 	"os"
 )
 
@@ -11,51 +10,52 @@ var (
 	Leb128Bytes = 0
 )
 
-type Decoder struct {
+type Reader struct {
+	data     []byte
+	bitIndex int
 }
 
-func NewDecoder() Decoder {
-	return Decoder{}
-}
-
-func (d *Decoder) Decode(filePath string) {
-	f, err := os.Open(filePath)
+func NewReader(filePath string) Reader {
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		panic(err)
 	}
 
-	r := bufio.NewReader(f)
-
-	for {
-		_, err := r.Peek(1)
-		if err == io.EOF {
-			return
-		} else if err != nil {
-			panic(err)
-		}
-
-		temporalUnitSize := leb128(r)
-
-		log.Printf("temporalUnitSize: %d", temporalUnitSize)
-
-		temporalUnit(r, temporalUnitSize)
-	}
-}
-
-func f8(r *bufio.Reader) int {
-	byte, err := r.ReadByte()
-	if err != nil {
-		panic(err)
+	return Reader{
+		data:     data,
+		bitIndex: 0,
 	}
 
-	return int(byte)
 }
 
-func leb128(r *bufio.Reader) int {
+func (r *Reader) discard(n int) {
+	r.bitIndex = r.bitIndex + n*8
+}
+
+func (r *Reader) hasRemainingData() bool {
+	return r.bitIndex < len(r.data)*8
+}
+
+func (r *Reader) readBit() int {
+	bit := int((r.data[int(math.Floor(float64(r.bitIndex)/8))] >> (8 - r.bitIndex%8 - 1)) & 1)
+	r.bitIndex++
+	return bit
+}
+
+func (r *Reader) f(n int) int {
+	x := 0
+	for i := 0; i < n; i++ {
+		x = 2*x + r.readBit()
+	}
+
+	return x
+}
+
+func (r *Reader) leb128() int {
 	value := 0
 	Leb128Bytes = 0
 	for i := 0; i < 8; i++ {
-		lebt128_byte := f8(r)
+		lebt128_byte := r.f(8)
 
 		value = value | (lebt128_byte&0x7f)<<(i*7)
 		Leb128Bytes += 1
@@ -68,9 +68,32 @@ func leb128(r *bufio.Reader) int {
 	return value
 }
 
-func temporalUnit(r *bufio.Reader, size int) {
+type Decoder struct {
+}
+
+func NewDecoder() Decoder {
+	return Decoder{}
+}
+
+func (d *Decoder) Decode(filePath string) {
+	r := NewReader(filePath)
+
+	for {
+		if !r.hasRemainingData() {
+			return
+		}
+
+		temporalUnitSize := r.leb128()
+
+		log.Printf("temporalUnitSize: %d", temporalUnitSize)
+
+		temporalUnit(&r, temporalUnitSize)
+	}
+}
+
+func temporalUnit(r *Reader, size int) {
 	for size > 0 {
-		frameUnitSize := leb128(r)
+		frameUnitSize := r.leb128()
 		log.Printf("frameUnitSize: %d", frameUnitSize)
 
 		size = size - Leb128Bytes
@@ -80,9 +103,9 @@ func temporalUnit(r *bufio.Reader, size int) {
 	}
 }
 
-func frameUnit(r *bufio.Reader, size int) {
+func frameUnit(r *Reader, size int) {
 	for size > 0 {
-		obuLength := leb128(r)
+		obuLength := r.leb128()
 		log.Printf("obuLength: %d", obuLength)
 
 		size = size - Leb128Bytes
@@ -92,6 +115,15 @@ func frameUnit(r *bufio.Reader, size int) {
 	}
 }
 
-func openBitstreamUnit(r *bufio.Reader, size int) {
-	r.Read(make([]byte, size))
+func openBitstreamUnit(r *Reader, size int) {
+	r.discard(size)
+}
+
+func obuHeader() {
+	/*
+		obuForbiddenBit := f1(r)
+		obuType := f4(r)
+		obuExtensionFlag := f1(r)
+		obuHasSizeField := f1(r)
+	*/
 }
