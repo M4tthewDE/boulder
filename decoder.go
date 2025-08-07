@@ -7,7 +7,8 @@ import (
 )
 
 var (
-	Leb128Bytes = 0
+	Leb128Bytes       = 0
+	OperatingPointIdc = 0
 )
 
 type Reader struct {
@@ -68,6 +69,10 @@ func (r *Reader) leb128() int {
 	return value
 }
 
+type DecoderResult struct {
+	temporalUnitCount int
+}
+
 type Decoder struct {
 }
 
@@ -75,12 +80,16 @@ func NewDecoder() Decoder {
 	return Decoder{}
 }
 
-func (d *Decoder) Decode(filePath string) {
+func (d *Decoder) Decode(filePath string) DecoderResult {
 	r := NewReader(filePath)
+
+	temporalUnitCount := 0
 
 	for {
 		if !r.hasRemainingData() {
-			return
+			return DecoderResult{
+				temporalUnitCount: temporalUnitCount,
+			}
 		}
 
 		temporalUnitSize := r.leb128()
@@ -88,13 +97,13 @@ func (d *Decoder) Decode(filePath string) {
 		log.Printf("temporalUnitSize: %d", temporalUnitSize)
 
 		temporalUnit(&r, temporalUnitSize)
+		temporalUnitCount++
 	}
 }
 
 func temporalUnit(r *Reader, size int) {
 	for size > 0 {
 		frameUnitSize := r.leb128()
-		log.Printf("frameUnitSize: %d", frameUnitSize)
 
 		size = size - Leb128Bytes
 		frameUnit(r, frameUnitSize)
@@ -106,7 +115,6 @@ func temporalUnit(r *Reader, size int) {
 func frameUnit(r *Reader, size int) {
 	for size > 0 {
 		obuLength := r.leb128()
-		log.Printf("obuLength: %d", obuLength)
 
 		size = size - Leb128Bytes
 		openBitstreamUnit(r, obuLength)
@@ -116,14 +124,55 @@ func frameUnit(r *Reader, size int) {
 }
 
 func openBitstreamUnit(r *Reader, size int) {
-	r.discard(size)
+	header := obuHeader(r)
+
+	var obuSize int
+	if header.hasSizeField {
+		obuSize = r.leb128()
+	} else {
+		obuSize = size - 1 - header.extensionFlag
+	}
+
+	if header.typ != OBU_SEQUENCE_HEADER &&
+		header.typ != OBU_TEMPORAL_DELIMITER &&
+		OperatingPointIdc != 0 &&
+		header.extensionFlag == 1 {
+		panic("todo")
+	}
+
+	if header.typ == OBU_SEQUENCE_HEADER {
+		panic("todo")
+	}
+
+	r.discard(obuSize)
 }
 
-func obuHeader() {
-	/*
-		obuForbiddenBit := f1(r)
-		obuType := f4(r)
-		obuExtensionFlag := f1(r)
-		obuHasSizeField := f1(r)
-	*/
+const OBU_SEQUENCE_HEADER = 1
+const OBU_TEMPORAL_DELIMITER = 2
+
+type ObuHeader struct {
+	forbidden     bool
+	typ           int
+	hasSizeField  bool
+	extensionFlag int
+}
+
+func obuHeader(r *Reader) ObuHeader {
+	forbidden := r.f(1) != 0
+	typ := r.f(4)
+	extensionFlag := r.f(1)
+	hasSizeField := r.f(1) != 0
+
+	// reserved
+	_ = r.f(1)
+	if extensionFlag != 0 {
+		panic("todo")
+	}
+
+	return ObuHeader{
+		forbidden:     forbidden,
+		typ:           typ,
+		hasSizeField:  hasSizeField,
+		extensionFlag: extensionFlag,
+	}
 }
