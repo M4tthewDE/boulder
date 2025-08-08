@@ -72,8 +72,20 @@ func (r *Reader) leb128() int {
 	return value
 }
 
+type OpenBitstreamUnit struct {
+	header ObuHeader
+}
+
+type FrameUnit struct {
+	obus []OpenBitstreamUnit
+}
+
+type TemporalUnit struct {
+	frameUnits []FrameUnit
+}
+
 type DecoderResult struct {
-	temporalUnitCount int
+	temporalUnits []TemporalUnit
 }
 
 type Decoder struct {
@@ -86,12 +98,12 @@ func NewDecoder() Decoder {
 func (d *Decoder) Decode(filePath string) DecoderResult {
 	r := NewReader(filePath)
 
-	temporalUnitCount := 0
+	temporalUnits := make([]TemporalUnit, 0)
 
 	for {
 		if !r.hasRemainingData() {
 			return DecoderResult{
-				temporalUnitCount: temporalUnitCount,
+				temporalUnits: temporalUnits,
 			}
 		}
 
@@ -99,34 +111,43 @@ func (d *Decoder) Decode(filePath string) DecoderResult {
 
 		log.Printf("temporalUnitSize: %d", temporalUnitSize)
 
-		temporalUnit(&r, temporalUnitSize)
-		temporalUnitCount++
+		temporalUnit := temporalUnit(&r, temporalUnitSize)
+		temporalUnits = append(temporalUnits, temporalUnit)
 	}
 }
 
-func temporalUnit(r *Reader, size int) {
+func temporalUnit(r *Reader, size int) TemporalUnit {
+	frameUnits := make([]FrameUnit, 0)
+
 	for size > 0 {
 		frameUnitSize := r.leb128()
 
 		size = size - Leb128Bytes
-		frameUnit(r, frameUnitSize)
+		frameUnit := frameUnit(r, frameUnitSize)
+		frameUnits = append(frameUnits, frameUnit)
 		size = size - frameUnitSize
 
 	}
+
+	return TemporalUnit{frameUnits: frameUnits}
 }
 
-func frameUnit(r *Reader, size int) {
+func frameUnit(r *Reader, size int) FrameUnit {
+	obus := make([]OpenBitstreamUnit, 0)
+
 	for size > 0 {
 		obuLength := r.leb128()
 
 		size = size - Leb128Bytes
-		openBitstreamUnit(r, obuLength)
+		obu := openBitstreamUnit(r, obuLength)
+		obus = append(obus, obu)
 		size = size - obuLength
-
 	}
+
+	return FrameUnit{obus: obus}
 }
 
-func openBitstreamUnit(r *Reader, size int) {
+func openBitstreamUnit(r *Reader, size int) OpenBitstreamUnit {
 	header := obuHeader(r)
 
 	var obuSize int
@@ -149,7 +170,7 @@ func openBitstreamUnit(r *Reader, size int) {
 		sequenceHeader(r)
 	} else {
 		r.discard(obuSize)
-		return
+		return OpenBitstreamUnit{header: header}
 	}
 
 	currentPosition := r.bitIndex
@@ -159,6 +180,8 @@ func openBitstreamUnit(r *Reader, size int) {
 		header.typ != OBU_FRAME {
 		trailingBits(r, obuSize*8-payloadBits)
 	}
+
+	return OpenBitstreamUnit{header: header}
 }
 
 func trailingBits(r *Reader, nbBits int) {

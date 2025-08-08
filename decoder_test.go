@@ -11,5 +11,5 @@ func TestDecode(t *testing.T) {
 
 	filePath := "data/argon_coveragetool_av1_base_and_extended_profiles_v2.1/profile0_core/streams/test10001.obu"
 	result := decoder.Decode(filePath)
-	assert.Equal(t, 9, result.temporalUnitCount)
+	assert.Equal(t, 9, len(result.temporalUnits))
 }
