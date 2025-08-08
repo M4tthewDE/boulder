@@ -213,7 +213,7 @@ func obuHeader(r *Reader) ObuHeader {
 	extensionFlag := r.f(1)
 	hasSizeField := r.f(1) != 0
 
-	log.Println(typ)
+	log.Printf("obu type: %d", typ)
 
 	// reserved
 	_ = r.f(1)
