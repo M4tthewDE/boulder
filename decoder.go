@@ -12,6 +12,16 @@ var (
 	OrderHintBits     int
 	BitDepth          int
 	NumPlanes         int
+	SeenFrameHeader   bool
+	FrameIsIntra      bool
+	RefFrameId        = make([]int, NUM_REF_FRAMES)
+	RefValid          = make([]int, NUM_REF_FRAMES)
+	RefOrderHint      = make([]int, NUM_REF_FRAMES)
+	OrderHints        = make([]int, REFS_PER_FRAME+LAST_FRAME)
+	PrevFrameId       int
+	OrderHint         int
+	sh                SequenceHeader
+	currentFrameId    = 0
 )
 
 type Reader struct {
@@ -167,7 +177,13 @@ func openBitstreamUnit(r *Reader, size int) OpenBitstreamUnit {
 	}
 
 	if header.typ == OBU_SEQUENCE_HEADER {
-		sequenceHeader(r)
+		sh = sequenceHeader(r)
+	} else if header.typ == OBU_TEMPORAL_DELIMITER {
+		SeenFrameHeader = false
+		r.discard(obuSize)
+		return OpenBitstreamUnit{header: header}
+	} else if header.typ == OBU_FRAME_HEADER {
+		frameHeader(r, sh)
 	} else {
 		r.discard(obuSize)
 		return OpenBitstreamUnit{header: header}
@@ -196,9 +212,11 @@ func trailingBits(r *Reader, nbBits int) {
 
 const OBU_SEQUENCE_HEADER = 1
 const OBU_TEMPORAL_DELIMITER = 2
+const OBU_FRAME_HEADER = 3
 const OBU_TILE_GROUP = 4
 const OBU_FRAME = 6
 const OBU_TILE_LIST = 8
+const OBU_PADDING = 15
 
 type ObuHeader struct {
 	forbidden     bool
@@ -251,6 +269,12 @@ type SequenceHeader struct {
 	enableCdef                      bool
 	enableRestoration               bool
 	colorConfig                     ColorConfig
+	frameIdNumbersPresentFlag       bool
+	reducedStillPictureHeader       bool
+	decoderModelInfoPresentFlag     bool
+	timingInfo                      TimingInfo
+	seqForceScreenContentTools      int
+	decoderModelInfo                DecoderModelInfo
 }
 
 func sequenceHeader(r *Reader) SequenceHeader {
@@ -259,19 +283,20 @@ func sequenceHeader(r *Reader) SequenceHeader {
 	reducedStillPictureHeader := r.f(1) != 0
 
 	var operatingPointIdc []int
+	var decoderModelInfoPresentFlag bool
+	var timingInf TimingInfo
+	var decoderModelInf DecoderModelInfo
 
 	if reducedStillPictureHeader {
 		panic("reducedStillPictureHeader")
 	} else {
 		timingInfoPresent := r.f(1) != 0
 		if timingInfoPresent {
-			_ = timingInfo(r)
+			timingInf = timingInfo(r)
 		}
 
-		var decoderModelInf DecoderModelInfo
-
-		decoderModelInfoPresent := r.f(1) != 0
-		if decoderModelInfoPresent {
+		decoderModelInfoPresentFlag = r.f(1) != 0
+		if decoderModelInfoPresentFlag {
 			decoderModelInf = decoderModelInfo(r)
 		}
 
@@ -296,7 +321,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 				seqTier[i] = 0
 			}
 
-			if decoderModelInfoPresent {
+			if decoderModelInfoPresentFlag {
 				decoderModelInfoPresentForThisOp[i] = r.f(1) != 0
 				if decoderModelInfoPresentForThisOp[i] {
 					operatingParamters[i] = operatingParametersInfo(r, decoderModelInf.bufferDelayLengthMinusOne+1)
@@ -345,6 +370,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 	var enableJntComp bool
 	var enableRefFrameMvs bool
 	var seqForceIntegerMv int
+	var seqForceScreenContentTools int
 
 	if reducedStillPictureHeader {
 		panic("reduced still picture header")
@@ -363,7 +389,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 			enableRefFrameMvs = r.f(1) != 0
 		}
 
-		seqForceScreenContentTools := SELECT_SCREEN_CONTENT_TOOLS
+		seqForceScreenContentTools = SELECT_SCREEN_CONTENT_TOOLS
 		if r.f(1) == 0 {
 			seqForceScreenContentTools = r.f(1)
 		}
@@ -406,6 +432,12 @@ func sequenceHeader(r *Reader) SequenceHeader {
 		enableCdef:                      enableCdef,
 		enableRestoration:               enableRestoration,
 		colorConfig:                     colorConfig,
+		frameIdNumbersPresentFlag:       frameIdNumbersPresentFlag,
+		reducedStillPictureHeader:       reducedStillPictureHeader,
+		decoderModelInfoPresentFlag:     decoderModelInfoPresentFlag,
+		timingInfo:                      timingInf,
+		seqForceScreenContentTools:      seqForceScreenContentTools,
+		decoderModelInfo:                decoderModelInf,
 	}
 }
 
@@ -584,5 +616,155 @@ func colorConfig(r *Reader, seqProfile int) ColorConfig {
 		subsamplingY:            subsamplingY,
 		chromaSamplePosition:    chromeSamplePosition,
 		separateUvDeltaQ:        r.f(1) != 0,
+	}
+}
+
+func frameHeader(r *Reader, sh SequenceHeader) {
+	if SeenFrameHeader {
+		panic("frame header copy")
+	} else {
+		SeenFrameHeader = true
+		_ = uncompressedHeader(r, sh)
+		panic("frame header")
+	}
+}
+
+const NUM_REF_FRAMES = 8
+const KEY_FRAME = 0
+const INTRA_ONLY_FRAME = 2
+const SWITCH_FRAME = 3
+
+const REFS_PER_FRAME = 7
+const LAST_FRAME = 1
+
+const PRIMARY_REF_NONE = 7
+
+type UncompressedHeader struct{}
+
+func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
+	var idLen int
+	if sh.frameIdNumbersPresentFlag {
+		idLen = (sh.additionalFrameIdLengthMinusTwo + sh.deltaFrameIdLengthMinusTwo + 3)
+	}
+
+	_ = (1 << NUM_REF_FRAMES) - 1
+
+	showExistingFrame := false
+	frameType := KEY_FRAME
+	FrameIsIntra = true
+	showFrame := true
+	showableFrame := false
+	var errorResilientMode bool
+	var framePresentationTime int
+
+	if !sh.reducedStillPictureHeader {
+		showExistingFrame = r.f(1) != 0
+		if showExistingFrame {
+			panic("show existing frame")
+		}
+
+		frameType = r.f(2)
+		FrameIsIntra = frameType == INTRA_ONLY_FRAME || frameType == KEY_FRAME
+		showFrame = r.f(1) != 0
+		if showFrame && sh.decoderModelInfoPresentFlag && !sh.timingInfo.equalPictureInterval {
+			framePresentationTime = r.f(sh.decoderModelInfo.framePresentationTimeLengthMinusOne + 1)
+		}
+
+		if showFrame {
+			showableFrame = frameType != KEY_FRAME
+		} else {
+			showableFrame = r.f(1) != 0
+		}
+
+		if frameType == SWITCH_FRAME || (frameType == KEY_FRAME && showFrame) {
+			errorResilientMode = true
+		} else {
+			errorResilientMode = r.f(1) != 0
+		}
+	}
+
+	if frameType == KEY_FRAME && showFrame {
+		for i := 0; i < NUM_REF_FRAMES; i++ {
+			RefValid[i] = 0
+			RefOrderHint[i] = 0
+		}
+		for i := 0; i < REFS_PER_FRAME; i++ {
+			OrderHints[LAST_FRAME+1] = 0
+		}
+	}
+
+	disableCdfUpdate := r.f(1) != 0
+
+	var allowScreenContentTools bool
+	if sh.seqForceScreenContentTools == SELECT_SCREEN_CONTENT_TOOLS {
+		allowScreenContentTools = r.f(1) != 0
+	} else {
+		allowScreenContentTools = sh.seqForceScreenContentTools != 0
+	}
+
+	var forceIntegerMv bool
+	if allowScreenContentTools {
+		if sh.seqForceIntegerMv == SELECT_INTEGER_MV {
+			forceIntegerMv = r.f(1) != 0
+		} else {
+			forceIntegerMv = sh.seqForceIntegerMv != 0
+		}
+	} else {
+		forceIntegerMv = false
+	}
+
+	if FrameIsIntra {
+		forceIntegerMv = true
+	}
+
+	if sh.frameIdNumbersPresentFlag {
+		PrevFrameId = currentFrameId
+		currentFrameId = r.f(idLen)
+		markRefRames(idLen)
+	} else {
+		currentFrameId = 0
+	}
+
+	var frameSizeOverrideFlag bool
+	if frameType == SWITCH_FRAME {
+		frameSizeOverrideFlag = true
+	} else if sh.reducedStillPictureHeader {
+		frameSizeOverrideFlag = false
+	} else {
+		frameSizeOverrideFlag = r.f(1) != 0
+	}
+
+	OrderHint = r.f(OrderHintBits)
+
+	var primaryRefFrame int
+	if FrameIsIntra || errorResilientMode {
+		primaryRefFrame = PRIMARY_REF_NONE
+	} else {
+		primaryRefFrame = r.f(3)
+	}
+
+	if sh.decoderModelInfoPresentFlag {
+		panic("decoder model info present in uncompressed header")
+	}
+
+	log.Println(showableFrame, disableCdfUpdate, forceIntegerMv, currentFrameId, frameSizeOverrideFlag, primaryRefFrame, framePresentationTime)
+
+	panic("uncompressed header")
+	return UncompressedHeader{}
+}
+
+func markRefRames(idLen int) {
+	diffLen := sh.deltaFrameIdLengthMinusTwo + 2
+
+	for i := 0; i < NUM_REF_FRAMES; i++ {
+		if currentFrameId > (1 << diffLen) {
+			if RefFrameId[i] > currentFrameId || RefFrameId[i] < (currentFrameId-(1<<diffLen)) {
+				RefValid[i] = 0
+			}
+		} else {
+			if RefFrameId[i] > currentFrameId && RefFrameId[i] < ((1<<idLen)+currentFrameId-(1<<diffLen)) {
+				RefValid[i] = 0
+			}
+		}
 	}
 }
