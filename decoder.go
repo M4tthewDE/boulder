@@ -22,6 +22,14 @@ var (
 	OrderHint         int
 	sh                SequenceHeader
 	currentFrameId    = 0
+	temporalId        = 0
+	spatialId         = 0
+	FrameWidth        int
+	FrameHeight       int
+	SuperresDenom     int
+	UpscaledWidth     int
+	MiCols            int
+	MiRows            int
 )
 
 type Reader struct {
@@ -251,30 +259,36 @@ const SELECT_SCREEN_CONTENT_TOOLS = 2
 const SELECT_INTEGER_MV = 2
 
 type SequenceHeader struct {
-	maxFrameWidthMinusOne           int
-	maxFrameHeightMinusOne          int
-	deltaFrameIdLengthMinusTwo      int
-	additionalFrameIdLengthMinusTwo int
-	use128x128Superblock            bool
-	enableFilterIntra               bool
-	enableIntraEdgeFilter           bool
-	enableInterIntraCompound        bool
-	enableMaskedCompound            bool
-	enableWarpedMotion              bool
-	enableDualFilter                bool
-	enableJntComp                   bool
-	enableRefFrameMvs               bool
-	seqForceIntegerMv               int
-	enableSuperres                  bool
-	enableCdef                      bool
-	enableRestoration               bool
-	colorConfig                     ColorConfig
-	frameIdNumbersPresentFlag       bool
-	reducedStillPictureHeader       bool
-	decoderModelInfoPresentFlag     bool
-	timingInfo                      TimingInfo
-	seqForceScreenContentTools      int
-	decoderModelInfo                DecoderModelInfo
+	maxFrameWidthMinusOne            int
+	maxFrameHeightMinusOne           int
+	deltaFrameIdLengthMinusTwo       int
+	additionalFrameIdLengthMinusTwo  int
+	use128x128Superblock             bool
+	enableFilterIntra                bool
+	enableIntraEdgeFilter            bool
+	enableInterIntraCompound         bool
+	enableMaskedCompound             bool
+	enableWarpedMotion               bool
+	enableDualFilter                 bool
+	enableJntComp                    bool
+	enableRefFrameMvs                bool
+	seqForceIntegerMv                int
+	enableSuperres                   bool
+	enableCdef                       bool
+	enableRestoration                bool
+	colorConfig                      ColorConfig
+	frameIdNumbersPresentFlag        bool
+	reducedStillPictureHeader        bool
+	decoderModelInfoPresentFlag      bool
+	timingInfo                       TimingInfo
+	seqForceScreenContentTools       int
+	decoderModelInfo                 DecoderModelInfo
+	operatingPointsCountMinusOne     int
+	decoderModelInfoPresentForThisOp []bool
+	operatingPointIdc                []int
+	enableOrderHint                  bool
+	frameWidthBitsMinusOne           int
+	frameHeightBitsMinusOne          int
 }
 
 func sequenceHeader(r *Reader) SequenceHeader {
@@ -286,6 +300,8 @@ func sequenceHeader(r *Reader) SequenceHeader {
 	var decoderModelInfoPresentFlag bool
 	var timingInf TimingInfo
 	var decoderModelInf DecoderModelInfo
+	var operatingPointsCountMinusOne int
+	decoderModelInfoPresentForThisOp := make([]bool, operatingPointsCountMinusOne+1)
 
 	if reducedStillPictureHeader {
 		panic("reducedStillPictureHeader")
@@ -301,12 +317,11 @@ func sequenceHeader(r *Reader) SequenceHeader {
 		}
 
 		initialDisplayDelayPresentFlag := r.f(1) != 0
-		operatingPointsCountMinusOne := r.f(5)
+		operatingPointsCountMinusOne = r.f(5)
 
 		operatingPointIdc = make([]int, operatingPointsCountMinusOne+1)
 		seqLevelIdx := make([]int, operatingPointsCountMinusOne+1)
 		seqTier := make([]int, operatingPointsCountMinusOne+1)
-		decoderModelInfoPresentForThisOp := make([]bool, operatingPointsCountMinusOne+1)
 		operatingParamters := make([]OperatingParametersInfo, operatingPointsCountMinusOne+1)
 		initialDisplayDelayPresentForThisOp := make([]bool, operatingPointsCountMinusOne+1)
 		initialDisplayDelayMinusOne := make([]int, operatingPointsCountMinusOne+1)
@@ -371,6 +386,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 	var enableRefFrameMvs bool
 	var seqForceIntegerMv int
 	var seqForceScreenContentTools int
+	var enableOrderHint bool
 
 	if reducedStillPictureHeader {
 		panic("reduced still picture header")
@@ -379,7 +395,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 		enableMaskedCompound = r.f(1) != 0
 		enableWarpedMotion = r.f(1) != 0
 		enableDualFilter = r.f(1) != 0
-		enableOrderHint := r.f(1) != 0
+		enableOrderHint = r.f(1) != 0
 
 		enableJntComp = false
 		enableRefFrameMvs = false
@@ -414,30 +430,36 @@ func sequenceHeader(r *Reader) SequenceHeader {
 	colorConfig := colorConfig(r, seqProfile)
 
 	return SequenceHeader{
-		maxFrameWidthMinusOne:           maxFrameWidthMinusOne,
-		maxFrameHeightMinusOne:          maxFrameHeightMinusOne,
-		deltaFrameIdLengthMinusTwo:      deltaFrameIdLengthMinusTwo,
-		additionalFrameIdLengthMinusTwo: additionalFrameIdLengthMinusOne,
-		use128x128Superblock:            use128x128Superblock,
-		enableFilterIntra:               enableFilterIntra,
-		enableIntraEdgeFilter:           enableIntraEdgeFilter,
-		enableInterIntraCompound:        enableInterIntraCompound,
-		enableMaskedCompound:            enableMaskedCompound,
-		enableWarpedMotion:              enableWarpedMotion,
-		enableDualFilter:                enableDualFilter,
-		enableJntComp:                   enableJntComp,
-		enableRefFrameMvs:               enableRefFrameMvs,
-		seqForceIntegerMv:               seqForceIntegerMv,
-		enableSuperres:                  enableSuperres,
-		enableCdef:                      enableCdef,
-		enableRestoration:               enableRestoration,
-		colorConfig:                     colorConfig,
-		frameIdNumbersPresentFlag:       frameIdNumbersPresentFlag,
-		reducedStillPictureHeader:       reducedStillPictureHeader,
-		decoderModelInfoPresentFlag:     decoderModelInfoPresentFlag,
-		timingInfo:                      timingInf,
-		seqForceScreenContentTools:      seqForceScreenContentTools,
-		decoderModelInfo:                decoderModelInf,
+		maxFrameWidthMinusOne:            maxFrameWidthMinusOne,
+		maxFrameHeightMinusOne:           maxFrameHeightMinusOne,
+		deltaFrameIdLengthMinusTwo:       deltaFrameIdLengthMinusTwo,
+		additionalFrameIdLengthMinusTwo:  additionalFrameIdLengthMinusOne,
+		use128x128Superblock:             use128x128Superblock,
+		enableFilterIntra:                enableFilterIntra,
+		enableIntraEdgeFilter:            enableIntraEdgeFilter,
+		enableInterIntraCompound:         enableInterIntraCompound,
+		enableMaskedCompound:             enableMaskedCompound,
+		enableWarpedMotion:               enableWarpedMotion,
+		enableDualFilter:                 enableDualFilter,
+		enableJntComp:                    enableJntComp,
+		enableRefFrameMvs:                enableRefFrameMvs,
+		seqForceIntegerMv:                seqForceIntegerMv,
+		enableSuperres:                   enableSuperres,
+		enableCdef:                       enableCdef,
+		enableRestoration:                enableRestoration,
+		colorConfig:                      colorConfig,
+		frameIdNumbersPresentFlag:        frameIdNumbersPresentFlag,
+		reducedStillPictureHeader:        reducedStillPictureHeader,
+		decoderModelInfoPresentFlag:      decoderModelInfoPresentFlag,
+		timingInfo:                       timingInf,
+		seqForceScreenContentTools:       seqForceScreenContentTools,
+		decoderModelInfo:                 decoderModelInf,
+		operatingPointsCountMinusOne:     operatingPointsCountMinusOne,
+		decoderModelInfoPresentForThisOp: decoderModelInfoPresentForThisOp,
+		operatingPointIdc:                operatingPointIdc,
+		enableOrderHint:                  enableOrderHint,
+		frameWidthBitsMinusOne:           frameWidthBitsMinusOne,
+		frameHeightBitsMinusOne:          frameHeightBitsMinusOne,
 	}
 }
 
@@ -657,6 +679,8 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 	var errorResilientMode bool
 	var framePresentationTime int
 
+	allFrames := (1 << NUM_REF_FRAMES) - 1
+
 	if !sh.reducedStillPictureHeader {
 		showExistingFrame = r.f(1) != 0
 		if showExistingFrame {
@@ -743,13 +767,45 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 		primaryRefFrame = r.f(3)
 	}
 
+	bufferRemovalTime := make([]int, sh.operatingPointsCountMinusOne+1)
+
 	if sh.decoderModelInfoPresentFlag {
-		panic("decoder model info present in uncompressed header")
+		if r.f(1) != 0 {
+			for opNum := 0; opNum <= sh.operatingPointsCountMinusOne; opNum++ {
+				if sh.decoderModelInfoPresentForThisOp[opNum] {
+					opPtIdc := sh.operatingPointIdc[opNum]
+					inTemporalLayer := ((opPtIdc >> temporalId) & 1) != 0
+					inSpatialLayer := ((opPtIdc >> (spatialId + 8)) & 1) != 0
+
+					if opPtIdc == 0 || (inTemporalLayer && inSpatialLayer) {
+						bufferRemovalTime[opNum] = r.f(sh.decoderModelInfo.bufferRemovalTimeLengthMinusOne + 1)
+					}
+				}
+			}
+		}
 	}
 
-	log.Println(showableFrame, disableCdfUpdate, forceIntegerMv, currentFrameId, frameSizeOverrideFlag, primaryRefFrame, framePresentationTime)
+	var refreshFrameFlags int
+	if frameType == SWITCH_FRAME || (frameType == KEY_FRAME && showFrame) {
+		refreshFrameFlags = allFrames
+	} else {
+		refreshFrameFlags = r.f(8)
+	}
+
+	if !FrameIsIntra || refreshFrameFlags != allFrames {
+		if errorResilientMode && sh.enableOrderHint {
+			panic("todo")
+		}
+	}
+
+	if FrameIsIntra {
+		frameSize(r, frameSizeOverrideFlag)
+		panic("render_size()")
+	}
 
 	panic("uncompressed header")
+
+	log.Println(showableFrame, disableCdfUpdate, forceIntegerMv, currentFrameId, frameSizeOverrideFlag, primaryRefFrame, framePresentationTime, refreshFrameFlags)
 	return UncompressedHeader{}
 }
 
@@ -767,4 +823,44 @@ func markRefRames(idLen int) {
 			}
 		}
 	}
+}
+
+func frameSize(r *Reader, frameSizeOverrideFlag bool) {
+	if frameSizeOverrideFlag {
+		frameWidthMinusOne := r.f(sh.frameWidthBitsMinusOne + 1)
+		frameHeightMinusOne := r.f(sh.frameHeightBitsMinusOne + 1)
+		FrameWidth = frameWidthMinusOne + 1
+		FrameHeight = frameHeightMinusOne + 1
+	} else {
+		FrameWidth = sh.maxFrameWidthMinusOne + 1
+		FrameHeight = sh.maxFrameHeightMinusOne + 1
+	}
+
+	superresParams(r)
+	computeImageSize()
+}
+
+const SUPERRES_DENOM_BITS = 3
+const SUPERRES_DENOM_MIN = 9
+const SUPERRES_NUM = 8
+
+func superresParams(r *Reader) {
+	useSuperres := false
+	if sh.enableSuperres {
+		useSuperres = r.f(1) != 0
+	}
+
+	if useSuperres {
+		SuperresDenom = r.f(SUPERRES_DENOM_BITS) + SUPERRES_DENOM_MIN
+	} else {
+		SuperresDenom = SUPERRES_NUM
+	}
+
+	UpscaledWidth = FrameWidth
+	FrameWidth = (UpscaledWidth*SUPERRES_NUM + (SuperresDenom / 2)) / SuperresDenom
+}
+
+func computeImageSize() {
+	MiCols = 2 * ((FrameWidth + 7) >> 3)
+	MiRows = 2 * ((FrameHeight + 7) >> 3)
 }
