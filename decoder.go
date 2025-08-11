@@ -6,6 +6,9 @@ import (
 	"os"
 )
 
+const MAX_SEGMENTS = 8
+const SEG_LVL_MAX = 8
+
 var (
 	Leb128Bytes       int
 	OperatingPointIdc int
@@ -30,6 +33,12 @@ var (
 	UpscaledWidth     int
 	MiCols            int
 	MiRows            int
+	RenderWidth       int
+	RenderHeight      int
+	FeatureData       [SEG_LVL_MAX][MAX_SEGMENTS]int
+	PrevSegmentIds    [][]int
+	GmType            []int
+	PrevGmParams      [][]int
 )
 
 type Reader struct {
@@ -657,7 +666,15 @@ const INTRA_ONLY_FRAME = 2
 const SWITCH_FRAME = 3
 
 const REFS_PER_FRAME = 7
+
+const INTRA_FRAME = 0
 const LAST_FRAME = 1
+const LAST2_FRAME = 2
+const LAST3_FRAME = 3
+const GOLDEN_FRAME = 4
+const BWDREF_FRAME = 5
+const ALTREF2_FRAME = 6
+const ALTREF_FRAME = 7
 
 const PRIMARY_REF_NONE = 7
 
@@ -785,6 +802,7 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 		}
 	}
 
+	useRefFrameMvs := false
 	var refreshFrameFlags int
 	if frameType == SWITCH_FRAME || (frameType == KEY_FRAME && showFrame) {
 		refreshFrameFlags = allFrames
@@ -798,14 +816,68 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 		}
 	}
 
+	var allowIntrabc bool
+	var frameRefsShortSignaling bool
+
 	if FrameIsIntra {
 		frameSize(r, frameSizeOverrideFlag)
-		panic("render_size()")
+		renderSize(r)
+		if allowScreenContentTools && UpscaledWidth == FrameWidth {
+			allowIntrabc = r.f(1) != 0
+		}
+	} else {
+		if !sh.enableOrderHint {
+			frameRefsShortSignaling = false
+		} else {
+			frameRefsShortSignaling = r.f(1) != 0
+			if !frameRefsShortSignaling {
+				panic("todo")
+			}
+		}
+
+		panic("todo")
+	}
+
+	var disableFrameEndUpdateCdf bool
+	if sh.reducedStillPictureHeader || disableCdfUpdate {
+		disableFrameEndUpdateCdf = true
+	} else {
+		disableFrameEndUpdateCdf = r.f(1) != 0
+	}
+
+	var loopFilterDeltaEnabled bool
+	var loopFilterRefDeltas []int
+	var loopFilterModeDeltas []int
+
+	if primaryRefFrame == PRIMARY_REF_NONE {
+		log.Println("todo: init_non_coeff_cdfs()")
+		setupPastIndependence()
+		loopFilterDeltaEnabled = true
+
+		loopFilterRefDeltas = make([]int, 8)
+		loopFilterRefDeltas[INTRA_FRAME] = 1
+		loopFilterRefDeltas[LAST_FRAME] = 0
+		loopFilterRefDeltas[LAST2_FRAME] = 0
+		loopFilterRefDeltas[LAST3_FRAME] = 0
+		loopFilterRefDeltas[BWDREF_FRAME] = 0
+		loopFilterRefDeltas[GOLDEN_FRAME] = -1
+		loopFilterRefDeltas[ALTREF_FRAME] = -1
+		loopFilterRefDeltas[ALTREF2_FRAME] = -1
+
+		loopFilterModeDeltas = make([]int, 2)
+		loopFilterModeDeltas[0] = 0
+		loopFilterModeDeltas[1] = 0
+	} else {
+		panic("todo")
+	}
+
+	if useRefFrameMvs {
+		panic("todo")
 	}
 
 	panic("uncompressed header")
 
-	log.Println(showableFrame, disableCdfUpdate, forceIntegerMv, currentFrameId, frameSizeOverrideFlag, primaryRefFrame, framePresentationTime, refreshFrameFlags)
+	log.Println(showableFrame, forceIntegerMv, primaryRefFrame, framePresentationTime, allowIntrabc, disableFrameEndUpdateCdf, loopFilterDeltaEnabled)
 	return UncompressedHeader{}
 }
 
@@ -863,4 +935,43 @@ func superresParams(r *Reader) {
 func computeImageSize() {
 	MiCols = 2 * ((FrameWidth + 7) >> 3)
 	MiRows = 2 * ((FrameHeight + 7) >> 3)
+}
+
+func renderSize(r *Reader) {
+	if r.f(1) != 0 {
+		RenderWidth = r.f(16) + 1
+		RenderHeight = r.f(16) + 1
+	} else {
+		RenderWidth = UpscaledWidth
+		RenderHeight = FrameHeight
+	}
+}
+
+const WARPEDMODEL_PREC_BITS = 16
+
+func setupPastIndependence() {
+	for i := 0; i < MAX_SEGMENTS; i++ {
+		for j := 0; j < SEG_LVL_MAX; j++ {
+			FeatureData[i][j] = 0
+		}
+	}
+
+	PrevSegmentIds = make([][]int, MiRows)
+
+	for row := 0; row < MiRows; row++ {
+		PrevSegmentIds[row] = make([]int, MiCols)
+	}
+
+	PrevGmParams = make([][]int, ALTREF_FRAME+1)
+	for ref := LAST_FRAME; ref <= ALTREF_FRAME; ref++ {
+		PrevGmParams[ref] = make([]int, 6)
+		for i := 0; i <= 5; i++ {
+			if ref%3 == 2 {
+				PrevGmParams[ref][i] = 1 << WARPEDMODEL_PREC_BITS
+			} else {
+				PrevGmParams[ref][i] = 0
+			}
+		}
+
+	}
 }
