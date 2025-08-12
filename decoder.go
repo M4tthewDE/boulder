@@ -96,6 +96,10 @@ func (r *Reader) leb128() int {
 		}
 	}
 
+	if value > (1<<32)-1 {
+		panic("invalid leb128 value")
+	}
+
 	return value
 }
 
@@ -244,6 +248,11 @@ type ObuHeader struct {
 
 func obuHeader(r *Reader) ObuHeader {
 	forbidden := r.f(1) != 0
+
+	if forbidden {
+		panic("forbidden bit must be 0")
+	}
+
 	typ := r.f(4)
 	extensionFlag := r.f(1)
 	hasSizeField := r.f(1) != 0
@@ -251,7 +260,12 @@ func obuHeader(r *Reader) ObuHeader {
 	log.Printf("obu type: %d", typ)
 
 	// reserved
-	_ = r.f(1)
+	reserved := r.f(1) != 0
+
+	if reserved {
+		panic("reserved bit must be 0")
+	}
+
 	if extensionFlag != 0 {
 		panic("obu extension header")
 	}
@@ -298,11 +312,18 @@ type SequenceHeader struct {
 	enableOrderHint                  bool
 	frameWidthBitsMinusOne           int
 	frameHeightBitsMinusOne          int
+	stillPicture                     bool
 }
 
 func sequenceHeader(r *Reader) SequenceHeader {
 	seqProfile := r.f(3)
-	_ = r.f(1) != 0
+	log.Printf("seqProfile: %d", seqProfile)
+
+	if seqProfile > 2 {
+		panic("invalid seqProfile")
+	}
+
+	stillPicture := r.f(1) != 0
 	reducedStillPictureHeader := r.f(1) != 0
 
 	var operatingPointIdc []int
@@ -315,8 +336,8 @@ func sequenceHeader(r *Reader) SequenceHeader {
 	if reducedStillPictureHeader {
 		panic("reducedStillPictureHeader")
 	} else {
-		timingInfoPresent := r.f(1) != 0
-		if timingInfoPresent {
+		timingInfoPresentFlag := r.f(1) != 0
+		if timingInfoPresentFlag {
 			timingInf = timingInfo(r)
 		}
 
@@ -469,6 +490,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 		enableOrderHint:                  enableOrderHint,
 		frameWidthBitsMinusOne:           frameWidthBitsMinusOne,
 		frameHeightBitsMinusOne:          frameHeightBitsMinusOne,
+		stillPicture:                     stillPicture,
 	}
 }
 
@@ -566,6 +588,8 @@ func colorConfig(r *Reader, seqProfile int) ColorConfig {
 			BitDepth = 8
 		}
 	}
+
+	log.Printf("BitDepth: %d", BitDepth)
 
 	monoChrome := false
 	if seqProfile != 1 {
