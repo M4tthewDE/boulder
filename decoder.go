@@ -39,6 +39,13 @@ var (
 	PrevSegmentIds    [][]int
 	GmType            []int
 	PrevGmParams      [][]int
+	TileColsLog2      int
+	TileCols          int
+	TileRowsLog2      int
+	TileRows          int
+	MiColStarts       []int
+	MiRowStarts       []int
+	TileSizeBytes     int
 )
 
 type Reader struct {
@@ -898,11 +905,107 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 	if useRefFrameMvs {
 		panic("todo")
 	}
+	contextUpdateTileId := tileInfo(r)
 
 	panic("uncompressed header")
 
-	log.Println(showableFrame, forceIntegerMv, primaryRefFrame, framePresentationTime, allowIntrabc, disableFrameEndUpdateCdf, loopFilterDeltaEnabled)
+	log.Println(showableFrame, forceIntegerMv, primaryRefFrame, framePresentationTime, allowIntrabc, disableFrameEndUpdateCdf, loopFilterDeltaEnabled, contextUpdateTileId)
 	return UncompressedHeader{}
+}
+
+const MAX_TILE_WIDTH = 4096
+const MAX_TILE_AREA = 4096 * 2304
+const MAX_TILE_COLS = 64
+const MAX_TILE_ROWS = 64
+
+func tileInfo(r *Reader) int {
+	var sbCols int
+	var sbRows int
+	var sbShift int
+
+	if sh.use128x128Superblock {
+		sbCols = (MiCols + 31) >> 5
+		sbRows = (MiRows + 31) >> 5
+		sbShift = 5
+	} else {
+		sbCols = (MiCols + 15) >> 4
+		sbRows = (MiRows + 15) >> 4
+		sbShift = 4
+	}
+
+	sbSize := sbShift + 2
+
+	maxTileWidthSb := MAX_TILE_WIDTH >> sbSize
+	maxTileAreaSb := MAX_TILE_AREA >> (2 * sbSize)
+
+	minLog2TileCols := tileLog2(maxTileWidthSb, sbCols)
+	maxLog2TileCols := tileLog2(1, min(sbCols, MAX_TILE_COLS))
+	maxLog2TileRows := tileLog2(1, min(sbRows, MAX_TILE_ROWS))
+	minLog2Tiles := max(minLog2TileCols, tileLog2(maxTileAreaSb, sbRows*sbCols))
+
+	uniformTileSpacingFlag := r.f(1) != 0
+	if uniformTileSpacingFlag {
+		TileColsLog2 = minLog2TileCols
+		for TileColsLog2 < maxLog2TileCols {
+			if r.f(1) == 1 {
+				TileColsLog2++
+			} else {
+				break
+			}
+		}
+
+		tileWidthSb := (sbCols + (1 << TileColsLog2) - 1) >> TileColsLog2
+
+		i := 0
+		MiColStarts = make([]int, sbCols+1)
+		for startSb := 0; startSb < sbCols; startSb += tileWidthSb {
+			MiColStarts[i] = startSb << sbShift
+			i += 1
+		}
+		MiColStarts[i] = MiCols
+		TileCols = i
+
+		minLog2TileRows := max(minLog2Tiles-TileColsLog2, 0)
+		TileRowsLog2 = minLog2TileRows
+
+		for TileRowsLog2 < maxLog2TileRows {
+			if r.f(1) == 1 {
+				TileRowsLog2++
+			} else {
+				break
+			}
+		}
+
+		tileHeightSb := (sbRows + (1 << TileRowsLog2) - 1) >> TileRowsLog2
+		i = 0
+		MiRowStarts = make([]int, sbRows+1)
+		for startSb := 0; startSb < sbRows; startSb += tileHeightSb {
+			MiRowStarts[i] = startSb << sbShift
+			i += 1
+		}
+
+		MiRowStarts[i] = MiRows
+		TileRows = i
+	} else {
+		panic("no uniformTileSpacingFlag")
+	}
+
+	if TileColsLog2 > 0 || TileRowsLog2 > 0 {
+		contextUpdateTileId := r.f(TileRowsLog2 + TileColsLog2)
+		tileSizeBytesMinusOne := r.f(2)
+		TileSizeBytes = tileSizeBytesMinusOne + 1
+		return contextUpdateTileId
+	} else {
+		return 0
+	}
+}
+
+func tileLog2(blkSize int, target int) int {
+	var k int
+	for k = 0; (blkSize << k) < target; k++ {
+	}
+
+	return k
 }
 
 func markRefRames(idLen int) {
