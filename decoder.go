@@ -46,6 +46,11 @@ var (
 	MiColStarts       []int
 	MiRowStarts       []int
 	TileSizeBytes     int
+	DeltaQUDc         int
+	DeltaQUAc         int
+	DeltaQYDc         int
+	DeltaQVAc         int
+	DeltaQVDc         int
 )
 
 type Reader struct {
@@ -105,6 +110,16 @@ func (r *Reader) leb128() int {
 
 	if value > (1<<32)-1 {
 		panic("invalid leb128 value")
+	}
+
+	return value
+}
+
+func (r *Reader) su(n int) int {
+	value := r.f(n)
+	signMask := 1 << (n - 1)
+	if (value & signMask) != 0 {
+		return value - 2*signMask
 	}
 
 	return value
@@ -906,11 +921,74 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 		panic("todo")
 	}
 	contextUpdateTileId := tileInfo(r)
+	quantizationParams := quantizationParams(r)
 
 	panic("uncompressed header")
 
-	log.Println(showableFrame, forceIntegerMv, primaryRefFrame, framePresentationTime, allowIntrabc, disableFrameEndUpdateCdf, loopFilterDeltaEnabled, contextUpdateTileId)
+	log.Println(showableFrame, forceIntegerMv, primaryRefFrame, framePresentationTime, allowIntrabc, disableFrameEndUpdateCdf, loopFilterDeltaEnabled, contextUpdateTileId, quantizationParams)
 	return UncompressedHeader{}
+}
+
+type QuantizationParams struct {
+	baseQIdx int
+	qmY      int
+	qmU      int
+	qmV      int
+}
+
+func quantizationParams(r *Reader) QuantizationParams {
+	baseQIdx := r.f(8)
+	DeltaQYDc = readDeltaQ(r)
+
+	DeltaQUDc = 0
+	DeltaQUAc = 0
+	DeltaQVDc = 0
+	DeltaQVAc = 0
+
+	if NumPlanes > 1 {
+		diffUvDelta := false
+		if sh.colorConfig.separateUvDeltaQ {
+			diffUvDelta = r.f(1) != 0
+		}
+
+		DeltaQUDc = readDeltaQ(r)
+		DeltaQUAc = readDeltaQ(r)
+
+		if diffUvDelta {
+			DeltaQVDc = readDeltaQ(r)
+			DeltaQVAc = readDeltaQ(r)
+		} else {
+			DeltaQVDc = DeltaQUDc
+			DeltaQVAc = DeltaQUAc
+		}
+	}
+
+	var qmY int
+	var qmU int
+	var qmV int
+
+	usingQMatrix := r.f(1) != 0
+	if usingQMatrix {
+		qmY = r.f(4)
+		qmU = r.f(4)
+
+		if !sh.colorConfig.separateUvDeltaQ {
+			qmV = qmU
+		} else {
+			qmV = r.f(4)
+		}
+	}
+
+	return QuantizationParams{baseQIdx: baseQIdx, qmY: qmY, qmU: qmU, qmV: qmV}
+
+}
+
+func readDeltaQ(r *Reader) int {
+	if r.f(1) != 0 {
+		return r.su(7)
+	} else {
+		return 0
+	}
 }
 
 const MAX_TILE_WIDTH = 4096
