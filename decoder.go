@@ -36,6 +36,7 @@ var (
 	RenderWidth       int
 	RenderHeight      int
 	FeatureData       [SEG_LVL_MAX][MAX_SEGMENTS]int
+	FeatureEnabled    [SEG_LVL_MAX][MAX_SEGMENTS]bool
 	PrevSegmentIds    [][]int
 	GmType            []int
 	PrevGmParams      [][]int
@@ -51,6 +52,14 @@ var (
 	DeltaQYDc         int
 	DeltaQVAc         int
 	DeltaQVDc         int
+	SegIdPreSkip      bool
+	LastActiveSegId   int
+	CodedLossless     = true
+	CurrentQIndex     = 0
+	LossLessArray     = make([]bool, MAX_SEGMENTS)
+	SegQMLevel        = make([][]int, 3)
+	AllLossless       bool
+	CdefDamping       int
 )
 
 type Reader struct {
@@ -922,18 +931,61 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 	}
 	contextUpdateTileId := tileInfo(r)
 	quantizationParams := quantizationParams(r)
+	segmentationEnabled := segmentationParams(r)
+	deltaQRes, deltaQPresent := deltaQParams(quantizationParams.baseQIdx, r)
+	deltaLfPresent, deltaLfRes, deltaLfMulti := deltaLfParams(deltaQPresent, allowIntrabc, r)
+
+	if primaryRefFrame == PRIMARY_REF_NONE {
+		log.Println("todo: init_coeff_cdfs()")
+	} else {
+		panic("load previous segment ids")
+	}
+
+	CodedLossless = true
+
+	SegQMLevel[0] = make([]int, MAX_SEGMENTS)
+	SegQMLevel[1] = make([]int, MAX_SEGMENTS)
+	SegQMLevel[2] = make([]int, MAX_SEGMENTS)
+
+	for segmentId := 0; segmentId < MAX_SEGMENTS; segmentId++ {
+		qIndex := getQIndex(true, segmentId, segmentationEnabled, deltaQPresent, quantizationParams.baseQIdx)
+		LossLessArray[segmentId] = qIndex == 0 && DeltaQYDc == 0 &&
+			DeltaQUAc == 0 && DeltaQUDc == 0 &&
+			DeltaQVAc == 0 && DeltaQVDc == 0
+
+		if !LossLessArray[segmentId] {
+			CodedLossless = false
+		}
+
+		if quantizationParams.usingQMatrix {
+			if LossLessArray[segmentId] {
+				SegQMLevel[0][segmentId] = 15
+				SegQMLevel[1][segmentId] = 15
+				SegQMLevel[2][segmentId] = 15
+			} else {
+				SegQMLevel[0][segmentId] = quantizationParams.qmY
+				SegQMLevel[1][segmentId] = quantizationParams.qmU
+				SegQMLevel[2][segmentId] = quantizationParams.qmV
+			}
+		}
+	}
+
+	AllLossless = CodedLossless && (FrameWidth == UpscaledWidth)
+	loopFilterParams := loopFilterParams(allowIntrabc, r)
+	cdefParams := cdefParams(allowIntrabc, r)
 
 	panic("uncompressed header")
 
-	log.Println(showableFrame, forceIntegerMv, primaryRefFrame, framePresentationTime, allowIntrabc, disableFrameEndUpdateCdf, loopFilterDeltaEnabled, contextUpdateTileId, quantizationParams)
+	log.Println(showableFrame, forceIntegerMv, framePresentationTime, disableFrameEndUpdateCdf, loopFilterDeltaEnabled, contextUpdateTileId, deltaQRes, deltaLfPresent, deltaLfRes, deltaLfMulti, loopFilterParams, cdefParams)
 	return UncompressedHeader{}
 }
 
 type QuantizationParams struct {
-	baseQIdx int
-	qmY      int
-	qmU      int
-	qmV      int
+	baseQIdx     int
+	usingQMatrix bool
+	qmY          int
+	qmU          int
+	qmV          int
 }
 
 func quantizationParams(r *Reader) QuantizationParams {
@@ -979,7 +1031,7 @@ func quantizationParams(r *Reader) QuantizationParams {
 		}
 	}
 
-	return QuantizationParams{baseQIdx: baseQIdx, qmY: qmY, qmU: qmU, qmV: qmV}
+	return QuantizationParams{baseQIdx: baseQIdx, usingQMatrix: usingQMatrix, qmY: qmY, qmU: qmU, qmV: qmV}
 
 }
 
@@ -1179,4 +1231,173 @@ func setupPastIndependence() {
 		}
 
 	}
+}
+
+const SEG_LVL_REF_FRAME = 5
+
+func segmentationParams(r *Reader) bool {
+	segmentationEnabled := r.f(1) != 0
+
+	if segmentationEnabled {
+		panic("segmentation enabled")
+	} else {
+		for i := 0; i < MAX_SEGMENTS; i++ {
+			for j := 0; j < SEG_LVL_MAX; j++ {
+				FeatureEnabled[i][j] = false
+				FeatureData[i][j] = 0
+			}
+		}
+	}
+
+	SegIdPreSkip = false
+	LastActiveSegId = 0
+
+	for i := 0; i < MAX_SEGMENTS; i++ {
+		for j := 0; j < SEG_LVL_MAX; j++ {
+			if FeatureEnabled[i][j] {
+				LastActiveSegId = i
+				if j >= SEG_LVL_REF_FRAME {
+					SegIdPreSkip = true
+				}
+			}
+		}
+	}
+
+	return segmentationEnabled
+}
+
+func deltaQParams(baseQIdx int, r *Reader) (deltaQRes int, deltaQPresent bool) {
+	deltaQRes = 0
+	deltaQPresent = false
+
+	if baseQIdx > 0 {
+		deltaQPresent = r.f(1) != 0
+	}
+
+	if deltaQPresent {
+		deltaQRes = r.f(2)
+	}
+
+	return deltaQRes, deltaQPresent
+}
+
+func deltaLfParams(deltaQPresent bool, allowIntrabc bool, r *Reader) (deltaLfPresent bool, deltaLfRes int, deltaLfMulti bool) {
+	deltaLfPresent = false
+	deltaLfRes = 0
+	deltaLfMulti = false
+
+	if deltaQPresent {
+		if !allowIntrabc {
+			deltaLfPresent = r.f(1) != 0
+		}
+		if deltaLfPresent {
+			deltaLfRes = r.f(2)
+			deltaLfMulti = r.f(1) != 0
+		}
+	}
+
+	return deltaLfPresent, deltaLfRes, deltaLfMulti
+}
+
+const SEG_LVL_ALT_Q = 0
+
+func getQIndex(ignoreDeltaQ bool, segmentId int, segmentationEnabled bool, deltaQPresent bool, baseQIdx int) int {
+	if segFeatureActiveIdx(segmentId, SEG_LVL_ALT_Q, segmentationEnabled) {
+		panic("segFeatureActiveIdx")
+	}
+
+	if !ignoreDeltaQ && deltaQPresent {
+		return CurrentQIndex
+	}
+
+	return baseQIdx
+}
+
+func segFeatureActiveIdx(idx int, feature int, segmentationEnabled bool) bool {
+	return segmentationEnabled && FeatureEnabled[idx][feature]
+}
+
+type LoopFilterParams struct {
+	loopFilterLevel        []int
+	loopFilterSharpness    int
+	loopFilterDeltaEnabled bool
+	loopFilterRefDeltas    []int
+	loopFilterModeDeltas   []int
+}
+
+const TOTAL_REFS_PER_FRAME = 8
+
+func loopFilterParams(allowIntrabc bool, r *Reader) LoopFilterParams {
+	loopFilterLevel := make([]int, 4)
+
+	if CodedLossless || allowIntrabc {
+		panic("todo")
+	}
+
+	loopFilterLevel[0] = r.f(6)
+	loopFilterLevel[1] = r.f(6)
+
+	if NumPlanes > 1 {
+		if loopFilterLevel[0] != 0 || loopFilterLevel[1] != 0 {
+			loopFilterLevel[2] = r.f(6)
+			loopFilterLevel[3] = r.f(6)
+		}
+	}
+
+	loopFilterSharpness := r.f(3)
+	loopFilterDeltaEnabled := r.f(1) != 0
+
+	loopFilterRefDeltas := make([]int, 8)
+	loopFilterModeDeltas := make([]int, 2)
+
+	if loopFilterDeltaEnabled {
+		loopFilterDeltaUpdate := r.f(1) != 0
+		if loopFilterDeltaUpdate {
+			for i := 0; i < TOTAL_REFS_PER_FRAME; i++ {
+				updateRefDelta := r.f(1) != 0
+				if updateRefDelta {
+					loopFilterRefDeltas[i] = r.su(7)
+				}
+			}
+
+			for i := 0; i < 2; i++ {
+				updateModeDelta := r.f(1) != 0
+				if updateModeDelta {
+					loopFilterModeDeltas[i] = r.su(7)
+				}
+			}
+		}
+	}
+
+	return LoopFilterParams{
+		loopFilterLevel:        loopFilterLevel,
+		loopFilterSharpness:    loopFilterSharpness,
+		loopFilterDeltaEnabled: loopFilterDeltaEnabled,
+		loopFilterRefDeltas:    loopFilterRefDeltas,
+		loopFilterModeDeltas:   loopFilterModeDeltas,
+	}
+}
+
+type CdefParams struct {
+	cdefBits          int
+	cdefYPriStrength  []int
+	cdefYSecStrength  []int
+	cdefUvPriStrength []int
+	cdefUvSecStrength []int
+}
+
+func cdefParams(allowIntrabc bool, _ *Reader) CdefParams {
+	if CodedLossless || allowIntrabc || !sh.enableCdef {
+		CdefDamping = 3
+
+		return CdefParams{
+			cdefBits:          3,
+			cdefYPriStrength:  make([]int, 1),
+			cdefYSecStrength:  make([]int, 1),
+			cdefUvPriStrength: make([]int, 1),
+			cdefUvSecStrength: make([]int, 1),
+		}
+	}
+
+	panic("cdefParams")
 }
