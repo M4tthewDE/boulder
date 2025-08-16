@@ -8,6 +8,7 @@ import (
 
 const MAX_SEGMENTS = 8
 const SEG_LVL_MAX = 8
+const BLOCK_SIZES = 22
 
 var (
 	Leb128Bytes          int
@@ -46,8 +47,13 @@ var (
 	TileCols             int
 	TileRowsLog2         int
 	TileRows             int
+	NumTiles             int
 	MiColStarts          []int
 	MiRowStarts          []int
+	MiRowStart           int
+	MiRowEnd             int
+	MiColStart           int
+	MiColEnd             int
 	TileSizeBytes        int
 	DeltaQUDc            int
 	DeltaQUAc            int
@@ -65,6 +71,27 @@ var (
 	FrameRestorationType = make([]int, 3)
 	UsesLr               bool
 	TxMode               int
+	SymbolValue          int
+	SymbolRange          int
+	SymbolMaxBits        int
+	AboveLevelContext    [][]int
+	AboveDcContext       [][]int
+	AboveSegPredContext  [][]int
+	LeftLevelContext     [][]int
+	LeftDcContext        [][]int
+	LeftSegPredContext   [][]int
+	DeltaLF              = make([]int, FRAME_LF_COUNT)
+	SgrprojXqdMid        = [2]int{-32, 31}
+	RefSgrXqd            [][]int
+	RefLrWiener          [][][]int
+	WienerTapsMid        = [3]int{3, -7, 15}
+	Num4x4BlocksWide     = [BLOCK_SIZES]int{
+		1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8,
+		16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
+	}
+	ReadDeltas   bool
+	cdefIdx      [][]int
+	BlockDecoded [][][]int
 )
 
 type Reader struct {
@@ -240,7 +267,9 @@ func openBitstreamUnit(r *Reader, size int) OpenBitstreamUnit {
 		r.discard(obuSize)
 		return OpenBitstreamUnit{header: header}
 	} else if header.typ == OBU_FRAME_HEADER {
-		frameHeader(r, sh)
+		frameHeader(r)
+	} else if header.typ == OBU_TILE_GROUP {
+		tileGroup(obuSize, r)
 	} else {
 		r.discard(obuSize)
 		return OpenBitstreamUnit{header: header}
@@ -713,12 +742,12 @@ func colorConfig(r *Reader, seqProfile int) ColorConfig {
 	}
 }
 
-func frameHeader(r *Reader, sh SequenceHeader) {
+func frameHeader(r *Reader) {
 	if SeenFrameHeader {
 		panic("frame header copy")
 	} else {
 		SeenFrameHeader = true
-		uh = uncompressedHeader(r, sh)
+		uh = uncompressedHeader(r)
 
 		if uh.showExistingFrame {
 			panic("showExistingFrame")
@@ -764,9 +793,11 @@ type UncompressedHeader struct {
 	reducedTxSet             bool
 	globalMotionParams       GlobalMotionParams
 	showExistingFrame        bool
+	quantizationParams       QuantizationParams
+	deltaQPresent            bool
 }
 
-func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
+func uncompressedHeader(r *Reader) UncompressedHeader {
 	var idLen int
 	if sh.frameIdNumbersPresentFlag {
 		idLen = (sh.additionalFrameIdLengthMinusTwo + sh.deltaFrameIdLengthMinusTwo + 3)
@@ -1037,6 +1068,8 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 		reducedTxSet:             reducedTxSet,
 		globalMotionParams:       globalMotionParams,
 		showExistingFrame:        showExistingFrame,
+		quantizationParams:       quantizationParams,
+		deltaQPresent:            deltaQPresent,
 	}
 }
 
@@ -1547,4 +1580,195 @@ func filmGrainParams(showFrame bool, showableFrame bool) {
 	}
 
 	panic("filmGrainParams")
+}
+
+func tileGroup(sz int, r *Reader) {
+	NumTiles = TileCols * TileRows
+
+	startBitPos := r.bitIndex
+	tileStartAndEndPresentFlag := false
+
+	if NumTiles > 1 {
+		tileStartAndEndPresentFlag = r.f(1) != 0
+	}
+
+	var tgStart int
+	var tgEnd int
+	if NumTiles == 1 || !tileStartAndEndPresentFlag {
+		tgStart = 0
+		tgEnd = NumTiles - 1
+	} else {
+		tgStart = r.f(TileColsLog2 + TileRowsLog2)
+		tgEnd = r.f(TileColsLog2 + TileRowsLog2)
+	}
+
+	byteAlignment(r)
+
+	endBitPos := r.bitIndex
+
+	headerBytes := (endBitPos - startBitPos) / 8
+	sz -= headerBytes
+
+	for TileNum = tgStart; TileNum <= tgEnd; TileNum++ {
+		tileRow := TileNum / TileCols
+		tileCol := TileNum % TileCols
+		lastTile := TileNum == tgEnd
+
+		var tileSize int
+		if lastTile {
+			tileSize = sz
+		} else {
+			tileSize = r.f(TileSizeBytes)
+			sz -= tileSize + TileSizeBytes
+		}
+
+		MiRowStart = MiRowStarts[tileRow]
+		MiRowEnd = MiRowStarts[tileRow+1]
+		MiColStart = MiColStarts[tileCol]
+		MiColEnd = MiColStarts[tileCol+1]
+		CurrentQIndex = uh.quantizationParams.baseQIdx
+		initSymbol(tileSize, r)
+		decodeTile(r)
+	}
+
+	panic("tileGroup")
+}
+
+func byteAlignment(r *Reader) {
+	for (r.bitIndex & 7) != 0 {
+		r.f(1)
+	}
+}
+
+func initSymbol(sz int, r *Reader) {
+	numBits := min(sz*8, 15)
+	buf := r.f(numBits)
+	paddedBuf := (buf << (15 - numBits))
+	SymbolValue = ((1 << 15) - 1) ^ paddedBuf
+	SymbolRange = 1 << 15
+	SymbolMaxBits = 8*sz - 15
+
+	log.Println("todo: tile copy of cdf arrays")
+}
+
+const FRAME_LF_COUNT = 4
+const WIENER_COEFFS = 3
+
+const BLOCK_128X128 = 15
+const BLOCK_64X64 = 12
+
+func decodeTile(r *Reader) {
+	clearAboveContext()
+
+	for i := 0; i < FRAME_LF_COUNT; i++ {
+		DeltaLF[i] = 0
+	}
+
+	RefSgrXqd = make([][]int, NumPlanes)
+	RefLrWiener = make([][][]int, NumPlanes)
+	for plane := 0; plane < NumPlanes; plane++ {
+		RefSgrXqd[plane] = make([]int, 2)
+		RefLrWiener[plane] = make([][]int, 2)
+		for pass := 0; pass < 2; pass++ {
+			RefSgrXqd[plane][pass] = SgrprojXqdMid[pass]
+
+			RefLrWiener[plane][pass] = make([]int, WIENER_COEFFS)
+			for i := 0; i < WIENER_COEFFS; i++ {
+				RefLrWiener[plane][pass][i] = WienerTapsMid[i]
+			}
+		}
+
+	}
+
+	var sbSize int
+	if sh.use128x128Superblock {
+		sbSize = BLOCK_128X128
+	} else {
+		sbSize = BLOCK_64X64
+	}
+
+	sbSize4 := Num4x4BlocksWide[sbSize]
+
+	cdefIdx = make([][]int, MiRowEnd+Num4x4BlocksWide[BLOCK_64X64])
+	for r := MiRowStart; r < MiRowEnd; r += sbSize4 {
+		clearLeftContext()
+
+		for c := MiColStart; c < MiColEnd; c += sbSize4 {
+			ReadDeltas = uh.deltaQPresent
+
+			cdefIdx[r] = make([]int, c+Num4x4BlocksWide[BLOCK_64X64])
+			clearCdef(r, c)
+			clearBlockDecodedFlags(r, c, sbSize4)
+		}
+	}
+
+	panic("decodeTile")
+}
+
+func clearAboveContext() {
+	AboveLevelContext = make([][]int, 2)
+	AboveDcContext = make([][]int, 2)
+	AboveSegPredContext = make([][]int, 2)
+
+	for i := 0; i < 2; i++ {
+		AboveLevelContext[i] = make([]int, MiCols)
+		AboveDcContext[i] = make([]int, MiCols)
+		AboveSegPredContext[i] = make([]int, MiCols)
+	}
+}
+
+func clearLeftContext() {
+	LeftLevelContext = make([][]int, 2)
+	LeftDcContext = make([][]int, 2)
+	LeftSegPredContext = make([][]int, 2)
+
+	for i := 0; i < 2; i++ {
+		LeftLevelContext[i] = make([]int, MiRows)
+		LeftDcContext[i] = make([]int, MiRows)
+		LeftSegPredContext[i] = make([]int, MiRows)
+	}
+}
+
+func clearCdef(r int, c int) {
+	cdefIdx[r][c] = -1
+
+	if sh.use128x128Superblock {
+		cdefSize4 := Num4x4BlocksWide[BLOCK_64X64]
+		cdefIdx[r][c+cdefSize4] = -1
+		cdefIdx[r+cdefSize4][c] = -1
+		cdefIdx[r+cdefSize4][c+cdefSize4] = -1
+	}
+}
+
+func clearBlockDecodedFlags(r int, c int, sbSize4 int) {
+
+	BlockDecoded = make([][][]int, NumPlanes)
+	for plane := 0; plane < NumPlanes; plane++ {
+		subX := 0
+		subY := 0
+		if plane > 0 {
+			subX = sh.colorConfig.subsamplingX
+			subY = sh.colorConfig.subsamplingY
+		}
+
+		sbWidth4 := (MiColEnd - c) >> subX
+		sbHeight4 := (MiRowEnd - r) >> subY
+
+		BlockDecoded[plane] = make([][]int, (sbSize4>>subY)+1)
+		for y := -1; y <= (sbSize4 >> subY); y++ {
+			set(y, BlockDecoded[plane], make([]int, (sbSize4>>subX)+1))
+			for x := -1; x <= (sbSize4 >> subX); x++ {
+				if y < 0 && x < sbWidth4 {
+					set3d(plane, y, x, BlockDecoded, 1)
+				} else if x < 0 && y < sbHeight4 {
+					set3d(plane, y, x, BlockDecoded, 1)
+				} else {
+					set3d(plane, y, x, BlockDecoded, 0)
+				}
+			}
+		}
+
+		set3d(plane, sbSize4>>subY, -1, BlockDecoded, 0)
+	}
+
 }
