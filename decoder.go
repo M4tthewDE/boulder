@@ -10,56 +10,60 @@ const MAX_SEGMENTS = 8
 const SEG_LVL_MAX = 8
 
 var (
-	Leb128Bytes       int
-	OperatingPointIdc int
-	OrderHintBits     int
-	BitDepth          int
-	NumPlanes         int
-	SeenFrameHeader   bool
-	FrameIsIntra      bool
-	RefFrameId        = make([]int, NUM_REF_FRAMES)
-	RefValid          = make([]int, NUM_REF_FRAMES)
-	RefOrderHint      = make([]int, NUM_REF_FRAMES)
-	OrderHints        = make([]int, REFS_PER_FRAME+LAST_FRAME)
-	PrevFrameId       int
-	OrderHint         int
-	sh                SequenceHeader
-	currentFrameId    = 0
-	temporalId        = 0
-	spatialId         = 0
-	FrameWidth        int
-	FrameHeight       int
-	SuperresDenom     int
-	UpscaledWidth     int
-	MiCols            int
-	MiRows            int
-	RenderWidth       int
-	RenderHeight      int
-	FeatureData       [SEG_LVL_MAX][MAX_SEGMENTS]int
-	FeatureEnabled    [SEG_LVL_MAX][MAX_SEGMENTS]bool
-	PrevSegmentIds    [][]int
-	GmType            []int
-	PrevGmParams      [][]int
-	TileColsLog2      int
-	TileCols          int
-	TileRowsLog2      int
-	TileRows          int
-	MiColStarts       []int
-	MiRowStarts       []int
-	TileSizeBytes     int
-	DeltaQUDc         int
-	DeltaQUAc         int
-	DeltaQYDc         int
-	DeltaQVAc         int
-	DeltaQVDc         int
-	SegIdPreSkip      bool
-	LastActiveSegId   int
-	CodedLossless     = true
-	CurrentQIndex     = 0
-	LossLessArray     = make([]bool, MAX_SEGMENTS)
-	SegQMLevel        = make([][]int, 3)
-	AllLossless       bool
-	CdefDamping       int
+	Leb128Bytes          int
+	OperatingPointIdc    int
+	OrderHintBits        int
+	BitDepth             int
+	NumPlanes            int
+	SeenFrameHeader      bool
+	FrameIsIntra         bool
+	RefFrameId           = make([]int, NUM_REF_FRAMES)
+	RefValid             = make([]int, NUM_REF_FRAMES)
+	RefOrderHint         = make([]int, NUM_REF_FRAMES)
+	OrderHints           = make([]int, REFS_PER_FRAME+LAST_FRAME)
+	PrevFrameId          int
+	OrderHint            int
+	sh                   SequenceHeader
+	uh                   UncompressedHeader
+	currentFrameId       = 0
+	temporalId           = 0
+	spatialId            = 0
+	FrameWidth           int
+	FrameHeight          int
+	SuperresDenom        int
+	UpscaledWidth        int
+	MiCols               int
+	MiRows               int
+	RenderWidth          int
+	RenderHeight         int
+	FeatureData          [SEG_LVL_MAX][MAX_SEGMENTS]int
+	FeatureEnabled       [SEG_LVL_MAX][MAX_SEGMENTS]bool
+	PrevSegmentIds       [][]int
+	GmType               = make([]int, ALTREF_FRAME+1)
+	PrevGmParams         [][]int
+	TileColsLog2         int
+	TileCols             int
+	TileRowsLog2         int
+	TileRows             int
+	MiColStarts          []int
+	MiRowStarts          []int
+	TileSizeBytes        int
+	DeltaQUDc            int
+	DeltaQUAc            int
+	DeltaQYDc            int
+	DeltaQVAc            int
+	DeltaQVDc            int
+	SegIdPreSkip         bool
+	LastActiveSegId      int
+	CodedLossless        = true
+	CurrentQIndex        = 0
+	LossLessArray        = make([]bool, MAX_SEGMENTS)
+	SegQMLevel           = make([][]int, 3)
+	AllLossless          bool
+	CdefDamping          int
+	FrameRestorationType = make([]int, 3)
+	UsesLr               bool
+	TxMode               int
 )
 
 type Reader struct {
@@ -344,6 +348,7 @@ type SequenceHeader struct {
 	frameWidthBitsMinusOne           int
 	frameHeightBitsMinusOne          int
 	stillPicture                     bool
+	filmGrainParamsPresent           bool
 }
 
 func sequenceHeader(r *Reader) SequenceHeader {
@@ -489,6 +494,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 	enableCdef := r.f(1) != 0
 	enableRestoration := r.f(1) != 0
 	colorConfig := colorConfig(r, seqProfile)
+	filmGrainParamsPresent := r.f(1) != 0
 
 	return SequenceHeader{
 		maxFrameWidthMinusOne:            maxFrameWidthMinusOne,
@@ -522,6 +528,7 @@ func sequenceHeader(r *Reader) SequenceHeader {
 		frameWidthBitsMinusOne:           frameWidthBitsMinusOne,
 		frameHeightBitsMinusOne:          frameHeightBitsMinusOne,
 		stillPicture:                     stillPicture,
+		filmGrainParamsPresent:           filmGrainParamsPresent,
 	}
 }
 
@@ -710,7 +717,7 @@ func frameHeader(r *Reader, sh SequenceHeader) {
 		panic("frame header copy")
 	} else {
 		SeenFrameHeader = true
-		_ = uncompressedHeader(r, sh)
+		uh = uncompressedHeader(r, sh)
 		panic("frame header")
 	}
 }
@@ -733,7 +740,23 @@ const ALTREF_FRAME = 7
 
 const PRIMARY_REF_NONE = 7
 
-type UncompressedHeader struct{}
+type UncompressedHeader struct {
+	framePresentationTime    int
+	forceIntegerMv           bool
+	disableFrameEndUpdateCdf bool
+	loopFilterDeltaEnabled   bool
+	contextUpdateTileId      int
+	deltaQRes                int
+	deltaLfPresent           bool
+	deltaLfRes               int
+	deltaLfMulti             bool
+	loopFilterParams         LoopFilterParams
+	cdefParams               CdefParams
+	skipmodeParams           SkipModeParams
+	allowWarpedMotion        bool
+	reducedTxSet             bool
+	globalMotionParams       GlobalMotionParams
+}
 
 func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 	var idLen int
@@ -973,11 +996,39 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 	AllLossless = CodedLossless && (FrameWidth == UpscaledWidth)
 	loopFilterParams := loopFilterParams(allowIntrabc, r)
 	cdefParams := cdefParams(allowIntrabc, r)
+	lrParams(allowIntrabc, r)
+	readTxMode(r)
+	referenceSelect := frameReferenceMode(r)
+	skipmodeParams := skipModeParams(referenceSelect)
 
-	panic("uncompressed header")
+	var allowWarpedMotion bool
+	if FrameIsIntra || errorResilientMode || !sh.enableWarpedMotion {
+		allowWarpedMotion = false
+	} else {
+		allowWarpedMotion = r.f(1) != 0
+	}
 
-	log.Println(showableFrame, forceIntegerMv, framePresentationTime, disableFrameEndUpdateCdf, loopFilterDeltaEnabled, contextUpdateTileId, deltaQRes, deltaLfPresent, deltaLfRes, deltaLfMulti, loopFilterParams, cdefParams)
-	return UncompressedHeader{}
+	reducedTxSet := r.f(1) != 0
+	globalMotionParams := globalMotionParams()
+	filmGrainParams(showFrame, showableFrame)
+
+	return UncompressedHeader{
+		framePresentationTime:    framePresentationTime,
+		forceIntegerMv:           forceIntegerMv,
+		disableFrameEndUpdateCdf: disableFrameEndUpdateCdf,
+		loopFilterDeltaEnabled:   loopFilterDeltaEnabled,
+		contextUpdateTileId:      contextUpdateTileId,
+		deltaQRes:                deltaQRes,
+		deltaLfPresent:           deltaLfPresent,
+		deltaLfRes:               deltaLfRes,
+		deltaLfMulti:             deltaLfMulti,
+		loopFilterParams:         loopFilterParams,
+		cdefParams:               cdefParams,
+		skipmodeParams:           skipmodeParams,
+		allowWarpedMotion:        allowWarpedMotion,
+		reducedTxSet:             reducedTxSet,
+		globalMotionParams:       globalMotionParams,
+	}
 }
 
 type QuantizationParams struct {
@@ -1400,4 +1451,91 @@ func cdefParams(allowIntrabc bool, _ *Reader) CdefParams {
 	}
 
 	panic("cdefParams")
+}
+
+const RESTORE_NONE = 0
+
+func lrParams(allowIntrabc bool, r *Reader) {
+	if AllLossless || allowIntrabc || !sh.enableRestoration {
+		FrameRestorationType[0] = RESTORE_NONE
+		FrameRestorationType[1] = RESTORE_NONE
+		FrameRestorationType[2] = RESTORE_NONE
+		UsesLr = false
+		return
+	}
+
+	panic("lrParams")
+}
+
+const ONLY_4X4 = 0
+const TX_MODE_LARGEST = 1
+const TX_MODE_SELECT = 2
+
+func readTxMode(r *Reader) {
+	if CodedLossless {
+		TxMode = ONLY_4X4
+	} else {
+		if r.f(1) != 0 {
+			TxMode = TX_MODE_SELECT
+		} else {
+			TxMode = TX_MODE_LARGEST
+		}
+	}
+}
+
+func frameReferenceMode(r *Reader) bool {
+	if FrameIsIntra {
+		return false
+	} else {
+		return r.f(1) != 0
+	}
+}
+
+type SkipModeParams struct {
+	skipModeAllowed bool
+}
+
+func skipModeParams(referenceSelect bool) SkipModeParams {
+	if FrameIsIntra || !referenceSelect || !sh.enableOrderHint {
+		return SkipModeParams{skipModeAllowed: false}
+	}
+
+	panic("skipModeParams")
+}
+
+const IDENTITY = 0
+
+type GlobalMotionParams struct {
+	gmParams [][]int
+}
+
+func globalMotionParams() GlobalMotionParams {
+	gmParams := make([][]int, ALTREF_FRAME+1)
+	for ref := LAST_FRAME; ref <= ALTREF_FRAME; ref++ {
+		GmType[ref] = IDENTITY
+
+		for i := 0; i < 6; i++ {
+			gmParams[ref] = make([]int, 6)
+			if i%3 == 2 {
+				gmParams[ref][i] = 1 << WARPEDMODEL_PREC_BITS
+			} else {
+				gmParams[ref][i] = 0
+			}
+		}
+	}
+
+	if FrameIsIntra {
+		return GlobalMotionParams{gmParams: gmParams}
+	}
+
+	panic("globalMotionParams")
+}
+
+func filmGrainParams(showFrame bool, showableFrame bool) {
+	if !sh.filmGrainParamsPresent || (!showFrame && !showableFrame) {
+		log.Println("todo: reset_grain_params")
+		return
+	}
+
+	panic("filmGrainParams")
 }
