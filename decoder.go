@@ -16,6 +16,7 @@ var (
 	BitDepth             int
 	NumPlanes            int
 	SeenFrameHeader      bool
+	TileNum              int
 	FrameIsIntra         bool
 	RefFrameId           = make([]int, NUM_REF_FRAMES)
 	RefValid             = make([]int, NUM_REF_FRAMES)
@@ -718,7 +719,13 @@ func frameHeader(r *Reader, sh SequenceHeader) {
 	} else {
 		SeenFrameHeader = true
 		uh = uncompressedHeader(r, sh)
-		panic("frame header")
+
+		if uh.showExistingFrame {
+			panic("showExistingFrame")
+		} else {
+			TileNum = 0
+			SeenFrameHeader = true
+		}
 	}
 }
 
@@ -756,6 +763,7 @@ type UncompressedHeader struct {
 	allowWarpedMotion        bool
 	reducedTxSet             bool
 	globalMotionParams       GlobalMotionParams
+	showExistingFrame        bool
 }
 
 func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
@@ -1028,6 +1036,7 @@ func uncompressedHeader(r *Reader, sh SequenceHeader) UncompressedHeader {
 		allowWarpedMotion:        allowWarpedMotion,
 		reducedTxSet:             reducedTxSet,
 		globalMotionParams:       globalMotionParams,
+		showExistingFrame:        showExistingFrame,
 	}
 }
 
