@@ -89,9 +89,14 @@ var (
 		1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8,
 		16, 16, 16, 32, 32, 1, 4, 2, 8, 4, 16,
 	}
-	ReadDeltas   bool
-	cdefIdx      [][]int
-	BlockDecoded [][][]int
+	Num4x4BlocksHigh = [BLOCK_SIZES]int{
+		1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16,
+		8, 16, 32, 16, 32, 4, 1, 8, 2, 16, 4,
+	}
+	ReadDeltas          bool
+	cdefIdx             [][]int
+	BlockDecoded        [][][]int
+	LoopRestorationSize []int
 )
 
 type Reader struct {
@@ -795,6 +800,8 @@ type UncompressedHeader struct {
 	showExistingFrame        bool
 	quantizationParams       QuantizationParams
 	deltaQPresent            bool
+	allowIntrabc             bool
+	useSuperres              bool
 }
 
 func uncompressedHeader(r *Reader) UncompressedHeader {
@@ -935,9 +942,10 @@ func uncompressedHeader(r *Reader) UncompressedHeader {
 
 	var allowIntrabc bool
 	var frameRefsShortSignaling bool
+	var useSuperres bool
 
 	if FrameIsIntra {
-		frameSize(r, frameSizeOverrideFlag)
+		useSuperres = frameSize(r, frameSizeOverrideFlag)
 		renderSize(r)
 		if allowScreenContentTools && UpscaledWidth == FrameWidth {
 			allowIntrabc = r.f(1) != 0
@@ -1070,6 +1078,8 @@ func uncompressedHeader(r *Reader) UncompressedHeader {
 		showExistingFrame:        showExistingFrame,
 		quantizationParams:       quantizationParams,
 		deltaQPresent:            deltaQPresent,
+		allowIntrabc:             allowIntrabc,
+		useSuperres:              useSuperres,
 	}
 }
 
@@ -1247,7 +1257,7 @@ func markRefRames(idLen int) {
 	}
 }
 
-func frameSize(r *Reader, frameSizeOverrideFlag bool) {
+func frameSize(r *Reader, frameSizeOverrideFlag bool) bool {
 	if frameSizeOverrideFlag {
 		frameWidthMinusOne := r.f(sh.frameWidthBitsMinusOne + 1)
 		frameHeightMinusOne := r.f(sh.frameHeightBitsMinusOne + 1)
@@ -1258,15 +1268,16 @@ func frameSize(r *Reader, frameSizeOverrideFlag bool) {
 		FrameHeight = sh.maxFrameHeightMinusOne + 1
 	}
 
-	superresParams(r)
+	useSuperres := superresParams(r)
 	computeImageSize()
+	return useSuperres
 }
 
 const SUPERRES_DENOM_BITS = 3
 const SUPERRES_DENOM_MIN = 9
 const SUPERRES_NUM = 8
 
-func superresParams(r *Reader) {
+func superresParams(r *Reader) bool {
 	useSuperres := false
 	if sh.enableSuperres {
 		useSuperres = r.f(1) != 0
@@ -1280,6 +1291,8 @@ func superresParams(r *Reader) {
 
 	UpscaledWidth = FrameWidth
 	FrameWidth = (UpscaledWidth*SUPERRES_NUM + (SuperresDenom / 2)) / SuperresDenom
+
+	return useSuperres
 }
 
 func computeImageSize() {
@@ -1498,6 +1511,8 @@ func cdefParams(allowIntrabc bool, _ *Reader) CdefParams {
 const RESTORE_NONE = 0
 
 func lrParams(allowIntrabc bool, r *Reader) {
+	LoopRestorationSize = make([]int, NumPlanes)
+
 	if AllLossless || allowIntrabc || !sh.enableRestoration {
 		FrameRestorationType[0] = RESTORE_NONE
 		FrameRestorationType[1] = RESTORE_NONE
@@ -1699,6 +1714,7 @@ func decodeTile(r *Reader) {
 			cdefIdx[r] = make([]int, c+Num4x4BlocksWide[BLOCK_64X64])
 			clearCdef(r, c)
 			clearBlockDecodedFlags(r, c, sbSize4)
+			readLr(r, c, sbSize)
 		}
 	}
 
@@ -1771,4 +1787,67 @@ func clearBlockDecodedFlags(r int, c int, sbSize4 int) {
 		set3d(plane, sbSize4>>subY, -1, BlockDecoded, 0)
 	}
 
+}
+
+const MI_SIZE = 4
+
+func readLr(r int, c int, bSize int) {
+	if uh.allowIntrabc {
+		return
+	}
+
+	w := Num4x4BlocksWide[bSize]
+	h := Num4x4BlocksHigh[bSize]
+
+	for plane := 0; plane < NumPlanes; plane++ {
+		if FrameRestorationType[plane] != RESTORE_NONE {
+			subX := 0
+			subY := 0
+			if plane != 0 {
+				subX = sh.colorConfig.subsamplingX
+				subY = sh.colorConfig.subsamplingY
+			}
+
+			unitSize := LoopRestorationSize[plane]
+			unitRows := countUnitsInFrame(unitSize, round2(FrameHeight, subY))
+			unitCols := countUnitsInFrame(unitSize, round2(UpscaledWidth, subX))
+			unitRowStart := (r*(MI_SIZE>>subY) + unitSize - 1) / unitSize
+			unitRowEnd := min(unitRows, ((r+h)*(MI_SIZE>>subY)+unitSize-1)/unitSize)
+
+			var numerator int
+			var denominator int
+			if uh.useSuperres {
+				numerator = (MI_SIZE >> subX) * SuperresDenom
+				denominator = unitSize * SUPERRES_NUM
+			} else {
+				numerator = MI_SIZE >> subX
+				denominator = unitSize
+			}
+
+			unitColStart := (c*numerator + denominator - 1) / denominator
+			unitColEnd := min(unitCols, ((c+w)*numerator+denominator-1)/denominator)
+
+			for unitRow := unitRowStart; unitRow < unitRowEnd; unitRow++ {
+				for unitCol := unitColStart; unitCol < unitColEnd; unitCol++ {
+					readLrUnit(plane, unitRow, unitCol)
+				}
+			}
+		}
+	}
+}
+
+func readLrUnit(plane int, unitRow int, unitCol int) {
+	panic("readLrUnit")
+}
+
+func countUnitsInFrame(unitSize int, frameSize int) int {
+	return max((frameSize+(unitSize>>1))/unitSize, 1)
+}
+
+func round2(x int, n int) int {
+	if n == 0 {
+		return 0
+	}
+
+	return (x + (1 << (n - 1))) >> n
 }
